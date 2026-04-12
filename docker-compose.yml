@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: team-rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+  backend:
+    build:
+      context: ./backend
+    container_name: team-rag-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATA_REDIS_HOST=redis
+      - DASH_SCOPE_API_KEY=${DASH_SCOPE_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX=${PINECONE_INDEX}
+      - PINECONE_REGION=${PINECONE_REGION}
+      - PINECONE_NAMESPACE=${PINECONE_NAMESPACE:-team-rag-namespace}
+    depends_on:
+      - redis
+    restart: on-failure
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: team-rag-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: on-failure
+
+volumes:
+  redis_data:

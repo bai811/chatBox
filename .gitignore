@@ -1,0 +1,7 @@
+# 忽略.env文件
+.env
+
+.vscode/
+docs/
+backend/target/
+.idea/
