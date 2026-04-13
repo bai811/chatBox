@@ -4,6 +4,11 @@ import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.service.AiServices;
+import dev.langchain4j.service.TokenStream;
+import dev.langchain4j.service.UserMessage;
+import com.team.rag.tools.TeamAssistantTools;
+import jakarta.annotation.PostConstruct;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -35,6 +40,21 @@ public class RagQAService {
     private final PineconeEmbeddingStore pineconeEmbeddingStore;
     private final StreamingChatLanguageModel streamingChatModel;
     private final ChatMemoryService chatMemoryService;
+    private final TeamAssistantTools teamAssistantTools;
+
+    private Assistant assistant;
+
+    interface Assistant {
+        TokenStream chat(@UserMessage String prompt);
+    }
+
+    @PostConstruct
+    public void initAssistant() {
+        this.assistant = AiServices.builder(Assistant.class)
+                .streamingChatLanguageModel(streamingChatModel)
+                .tools(teamAssistantTools)
+                .build();
+    }
 
     // 向量检索返回前K条
     @Value("${rag.hybrid-retrieval.vector-top-k}")
@@ -70,30 +90,25 @@ public class RagQAService {
         String prompt = buildPrompt(query, finalSegments, memory);
         log.info("提示词构建完成，包含{}个RAG片段，{}条历史消息", finalSegments.size(), memory.size());
 
-        // 步骤5：调用流式大模型生成答案
+        // 步骤5：调用流式大模型生成答案（通过 AiServices 支持 Function Calling）
         return Flux.create(emitter -> {
             StringBuilder fullResponse = new StringBuilder();
 
-            streamingChatModel.chat(prompt, new StreamingChatResponseHandler() {
-                @Override
-                public void onPartialResponse(String token) {
-                    fullResponse.append(token);
-                    emitter.next(token);
-                }
-
-                @Override
-                public void onCompleteResponse(ChatResponse response) {
-                    // 步骤6：更新短期记忆
-                    chatMemoryService.addMessage(sessionId, "assistant", fullResponse.toString());
-                    emitter.complete();
-                }
-
-                @Override
-                public void onError(Throwable error) {
-                    log.error("大模型流式调用失败", error);
-                    emitter.error(error);
-                }
-            });
+            assistant.chat(prompt)
+                    .onPartialResponse(token -> {
+                        fullResponse.append(token);
+                        emitter.next(token);
+                    })
+                    .onCompleteResponse(response -> {
+                        // 步骤6：更新短期记忆
+                        chatMemoryService.addMessage(sessionId, "assistant", fullResponse.toString());
+                        emitter.complete();
+                    })
+                    .onError(error -> {
+                        log.error("大模型流式调用失败", error);
+                        emitter.error(error);
+                    })
+                    .start();
         });
     }
 
@@ -133,10 +148,21 @@ public class RagQAService {
     private String buildPrompt(String query, List<TextSegment> segments, List<ChatMessage> memory) {
         StringBuilder prompt = new StringBuilder();
 
-        prompt.append("你是一个团队智能知识库助手。请严格基于以下提供的【知识库参考内容】回答用户的问题。\n");
-        prompt.append("要求：\n");
-        prompt.append("1. 只能根据知识库内容进行提取和总结。如果提供的知识库内容只有此问题本身而没有具体的答案，或者完全是不相关内容，请直接回复：“抱歉，知识库中未找到相关答案。”\n");
-        prompt.append("2. 不要推测、不要编造，也不要对知识库文档本身的内容结构（例如说明这是个测试样例、或描述位于步骤几）进行冗长的分析。\n\n");
+        prompt.append("请严格遵循以下规则进行回复：\n");
+
+        prompt.append("1. 【首次问候】请仅在用户发起第一次会话时，主动和用户打个招呼，并简短介绍你是谁以及你能提供哪些帮助。\n");
+
+        prompt.append(
+                "2. 【专业解答与加工】作为专业的知识库助手，请以知识库内容为核心依据解答问题。要求结合上下文，用自然、流畅的语言重新组织答案，绝不能生硬地大段复制粘贴原文。提炼出对用户最有价值的核心信息。\n");
+
+        prompt.append(
+                "3. 【智能降噪】自动过滤并忽略知识库片段中关于文档结构、操作说明或测试标记的元数据文字（例如“本文档是说明书”、“测试数据”、“上传本文件后即可提问”等内容），只针对用户的核心意图回答。\n");
+
+        prompt.append("4. 【合理延展与边界】如果知识库内容不充分，你可以结合自身的常识进行适度延展解答，使回答更丰满。但【严禁】编造具体的项目数据、未提及的功能或虚构的技术指标。\n");
+
+        prompt.append("5. 【领域限制】你必须遵守职责边界。当被问及与本项目、IT技术、企业知识库无关的其他领域时，请礼貌地表示歉意，并说明你只是该项目的专属助手，无法在其他领域提供帮助。\n");
+
+        prompt.append("6. 【互动风格】请在回答的段落排版中，适当包含一些轻松可爱的Emoji图标和表情，让对话更有温度，但不要过度使用导致阅读困难。\n");
 
         if (!segments.isEmpty()) {
             prompt.append("【知识库参考内容】\n");

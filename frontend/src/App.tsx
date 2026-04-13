@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatWindow from './components/ChatWindow';
 import MessageInput from './components/MessageInput';
 import DocumentUpload from './components/DocumentUpload';
-import { createSession, deleteSession, streamChat } from './api/chat';
+import { createSession, deleteSession, streamChat, getAllSessions, getSessionMessages } from './api/chat';
 import type { Message, Session } from './types';
 import './App.css';
 
@@ -15,6 +15,40 @@ function App() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [injectedText, setInjectedText] = useState<string | undefined>(undefined);
   const msgIdCounter = useRef(0);
+
+  // 初始化加载后台现存的回话信息
+  useEffect(() => {
+    async function loadHistory() {
+      try {
+        const sids = await getAllSessions();
+        const loadedSessions: Session[] = await Promise.all(
+          sids.map(async (sid) => {
+            const msgs = await getSessionMessages(sid);
+            return {
+              id: sid,
+              // 使用第一条用户的输入作为标题，如果没有则默认
+              title: msgs.length > 1 ? msgs[1].content.slice(0, 20) : '历史对话',
+              messages: msgs
+                .filter((m) => m.role !== 'system') // 过滤掉系统提示词消息
+                .map((m, i) => ({
+                  id: `history-${sid}-${i}`,
+                  role: m.role as 'user' | 'assistant',
+                  content: m.content
+                }))
+            };
+          })
+        );
+        // 按最后一条消息的顺序可以再这里排序一下，这里简单拼接
+        setSessions(loadedSessions);
+        if (loadedSessions.length > 0) {
+          setActiveSessionId(loadedSessions[0].id);
+        }
+      } catch (err) {
+        console.error('获取历史记录失败:', err);
+      }
+    }
+    loadHistory();
+  }, []);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
 
